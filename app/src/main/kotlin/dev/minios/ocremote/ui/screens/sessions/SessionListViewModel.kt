@@ -34,8 +34,9 @@ import javax.inject.Inject
 private const val TAG = "SessionListViewModel"
 
 data class SessionListUiState(
-    val sessionGroups: List<ProjectSessionGroup> = emptyList(),
-    val projects: List<Project> = emptyList(),
+    val projects: List<ProjectWithSessions> = emptyList(),
+    val selectedProjectId: String? = null,
+    val knownProjects: List<Project> = emptyList(),
     val serverName: String = "",
     val isLoading: Boolean = true,
     val error: String? = null,
@@ -43,18 +44,10 @@ data class SessionListUiState(
     val isSelectionMode: Boolean = false,
 )
 
-/** A group of sessions belonging to a project. */
-data class ProjectSessionGroup(
-    val projectId: String,
-    val projectName: String,
-    val directory: String,
+data class ProjectWithSessions(
+    val project: Project,
     val sessions: List<SessionItem>,
-    /** Per-session tilde-path labels (sessionId -> tildePath) for flat display. */
-    val sessionDirLabels: Map<String, String> = emptyMap()
 )
-
-/** Helper for session directory info. */
-private data class SessionDirInfo(val name: String, val tildePath: String)
 
 data class SessionItem(
     val session: Session,
@@ -91,6 +84,7 @@ class SessionListViewModel @Inject constructor(
     private val _projects = MutableStateFlow<List<Project>>(emptyList())
     private val _homeDir = MutableStateFlow<String?>(null)
     private val _selectedIds = MutableStateFlow<Set<String>>(emptySet())
+    private val _selectedProjectId = MutableStateFlow<String?>(null)
     private val _navigateToSession = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val navigateToSession: SharedFlow<String> = _navigateToSession.asSharedFlow()
 
@@ -103,8 +97,8 @@ class SessionListViewModel @Inject constructor(
             _isLoading,
             _error,
             _projects,
-            _homeDir,
             _selectedIds,
+            _selectedProjectId,
         )
     ) { values ->
         val allSessions = values[0] as List<Session>
@@ -113,8 +107,8 @@ class SessionListViewModel @Inject constructor(
         val loading = values[3] as Boolean
         val error = values[4] as String?
         val projects = values[5] as List<Project>
-        val homeDir = values[6] as String?
-        val selectedIds = values[7] as Set<String>
+        val selectedIds = values[6] as Set<String>
+        val selectedProjectId = values[7] as String?
 
         // Filter sessions belonging to this server
         val serverSessionIds = serverSessions[serverId] ?: emptySet()
@@ -128,39 +122,72 @@ class SessionListViewModel @Inject constructor(
                 )
             }
 
-        // Build a flat list sorted by time — each session carries its own
-        // tilde-path label derived from session.directory
-        val allItems = sessions.map { item ->
-            val dir = item.session.directory.trimEnd('/').ifEmpty { "/" }
-            val tildePath = if (homeDir != null && dir.startsWith(homeDir)) {
-                "~" + dir.removePrefix(homeDir)
-            } else {
-                dir
+        val projectById = projects.associateBy { it.id }
+        val projectByWorktree = projects
+            .filter { it.worktree.isNotBlank() }
+            .associateBy { it.worktree.trimEnd('/') }
+
+        val grouped = linkedMapOf<String, MutableList<SessionItem>>()
+        var unknownProject: Project? = null
+
+        sessions.forEach { item ->
+            val session = item.session
+            val normalizedDir = session.directory.trimEnd('/').ifEmpty { "/" }
+            val matchedProject = when {
+                session.projectId.isNotBlank() -> projectById[session.projectId]
+                else -> projectByWorktree[normalizedDir]
             }
-            val dirName = dir.substringAfterLast('/').ifEmpty { "/" }
-            item to SessionDirInfo(dirName, tildePath)
+
+            if (matchedProject != null) {
+                grouped.getOrPut(matchedProject.id) { mutableListOf() }.add(item)
+            } else {
+                if (unknownProject == null) {
+                    unknownProject = Project(
+                        id = "",
+                        worktree = normalizedDir,
+                        name = normalizedDir,
+                    )
+                }
+                grouped.getOrPut("") { mutableListOf() }.add(item)
+            }
         }
 
-        // Single group containing all sessions (flat, sorted by time)
-        val groups = listOf(
-            ProjectSessionGroup(
-                projectId = "",
-                projectName = "",
-                directory = "",
-                sessions = allItems.map { it.first },
-                sessionDirLabels = allItems.associate { it.first.session.id to it.second.tildePath }
+        val projectList = grouped.map { (key, projectSessions) ->
+            val project = if (key.isEmpty()) {
+                unknownProject ?: Project(id = "", worktree = "", name = "")
+            } else {
+                projectById[key] ?: Project(id = "", worktree = "", name = "")
+            }
+            ProjectWithSessions(
+                project = project,
+                sessions = projectSessions.sortedByDescending { it.session.time.updated },
             )
-        )
+        }.sortedByDescending { bucket ->
+            bucket.sessions.maxOfOrNull { it.session.time.updated } ?: Long.MIN_VALUE
+        }
 
-        val visibleSessionIds = allItems.map { it.first.session.id }.toSet()
+        val visibleSessions = if (selectedProjectId == null) {
+            projectList.flatMap { it.sessions }
+        } else {
+            projectList.firstOrNull { it.project.id == selectedProjectId }?.sessions.orEmpty()
+        }
+
+        val visibleSessionIds = visibleSessions.map { it.session.id }.toSet()
         val validSelectedIds = selectedIds.intersect(visibleSessionIds)
         if (validSelectedIds != selectedIds) {
             _selectedIds.value = validSelectedIds
         }
 
+        val hasSelectedProject = selectedProjectId != null && projectList.any { it.project.id == selectedProjectId }
+        val effectiveSelectedProjectId = if (hasSelectedProject) selectedProjectId else null
+        if (effectiveSelectedProjectId != selectedProjectId) {
+            _selectedProjectId.value = null
+        }
+
         SessionListUiState(
-            sessionGroups = groups,
-            projects = projects,
+            projects = projectList,
+            selectedProjectId = effectiveSelectedProjectId,
+            knownProjects = projects,
             serverName = serverName,
             isLoading = loading,
             error = error,
@@ -278,10 +305,26 @@ class SessionListViewModel @Inject constructor(
     }
 
     fun selectAll() {
-        val allIds = uiState.value.sessionGroups
-            .flatMap { group -> group.sessions.map { it.session.id } }
+        val state = uiState.value
+        val visible = if (state.selectedProjectId == null) {
+            state.projects.flatMap { it.sessions }
+        } else {
+            state.projects.firstOrNull { it.project.id == state.selectedProjectId }?.sessions.orEmpty()
+        }
+        val allIds = visible
+            .map { it.session.id }
             .toSet()
         _selectedIds.value = allIds
+    }
+
+    fun selectProject(projectId: String) {
+        _selectedProjectId.value = projectId
+        clearSelection()
+    }
+
+    fun clearProjectSelection() {
+        _selectedProjectId.value = null
+        clearSelection()
     }
 
     fun deleteSelected() {

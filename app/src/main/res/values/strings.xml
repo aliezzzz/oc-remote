@@ -108,6 +108,13 @@
     <string name="sessions_new_short">New session…</string>
     <string name="sessions_empty">No sessions yet</string>
     <string name="sessions_tap_plus">Tap + to start a new conversation</string>
+    <string name="projects_title">Projects</string>
+    <string name="projects_empty">No projects yet</string>
+    <string name="projects_tap_plus">Tap + to create a new project folder</string>
+    <string name="project_sessions_count">%1$d sessions</string>
+    <string name="project_unknown">Unknown Project</string>
+    <string name="sessions_in_project">Sessions in %1$s</string>
+    <string name="sessions_empty_in_project">No sessions in this project</string>
     <string name="sessions_open_project">Open project</string>
     <string name="sessions_search_folders">Search folders</string>
     <string name="sessions_no_folders">No folders found</string>

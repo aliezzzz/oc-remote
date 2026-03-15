@@ -122,6 +122,16 @@ fun SessionListScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val isAmoled = isAmoledTheme()
+    val selectedProject = remember(uiState.projects, uiState.selectedProjectId) {
+        uiState.projects.firstOrNull { it.project.id == uiState.selectedProjectId }
+    }
+    val visibleSessions = remember(uiState.projects, uiState.selectedProjectId) {
+        if (uiState.selectedProjectId == null) {
+            emptyList()
+        } else {
+            selectedProject?.sessions.orEmpty()
+        }
+    }
     // Navigate to newly created session
     LaunchedEffect(viewModel) {
         viewModel.navigateToSession
@@ -146,8 +156,12 @@ fun SessionListScreen(
     var showOpenProject by remember { mutableStateOf(false) }
     var showQuickNewSession by remember { mutableStateOf(false) }
 
-    BackHandler(enabled = uiState.isSelectionMode) {
-        viewModel.clearSelection()
+    BackHandler {
+        when {
+            uiState.isSelectionMode -> viewModel.clearSelection()
+            uiState.selectedProjectId != null -> viewModel.clearProjectSelection()
+            else -> onNavigateBack()
+        }
     }
 
     Scaffold(
@@ -184,15 +198,26 @@ fun SessionListScreen(
             } else {
                 TopAppBar(
                     title = {
-                        Column {
-                            Text(
-                                text = uiState.serverName.ifEmpty { stringResource(R.string.sessions_title) },
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                        }
+                        Text(
+                            text = if (uiState.selectedProjectId == null) {
+                                stringResource(R.string.projects_title)
+                            } else {
+                                selectedProject?.project?.let { project ->
+                                    if (project.id.isBlank()) stringResource(R.string.project_unknown) else project.displayName
+                                }
+                                    ?: uiState.serverName.ifEmpty { stringResource(R.string.sessions_title) }
+                            },
+                            style = MaterialTheme.typography.titleMedium
+                        )
                     },
                     navigationIcon = {
-                        IconButton(onClick = onNavigateBack) {
+                        IconButton(onClick = {
+                            if (uiState.selectedProjectId != null) {
+                                viewModel.clearProjectSelection()
+                            } else {
+                                onNavigateBack()
+                            }
+                        }) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.back))
                         }
                     },
@@ -204,12 +229,16 @@ fun SessionListScreen(
             if (!uiState.isSelectionMode) {
                 FloatingActionButton(
                     onClick = {
-                        // If there are known projects, show the quick dialog first;
-                        // otherwise go straight to the full directory browser.
-                        if (uiState.sessionGroups.isNotEmpty()) {
-                            showQuickNewSession = true
+                        if (uiState.selectedProjectId != null) {
+                            val projectDir = selectedProject?.project?.worktree?.takeIf { it.isNotBlank() }
+                                ?: selectedProject?.sessions?.firstOrNull()?.session?.directory
+                            viewModel.createNewSession(directory = projectDir)
                         } else {
-                            showOpenProject = true
+                            if (uiState.projects.isNotEmpty()) {
+                                showQuickNewSession = true
+                            } else {
+                                showOpenProject = true
+                            }
                         }
                     },
                     containerColor = if (isAmoled) Color.Black else MaterialTheme.colorScheme.primaryContainer,
@@ -244,16 +273,15 @@ fun SessionListScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            val allSessions = uiState.sessionGroups.flatMap { it.sessions }
             when {
-                uiState.isLoading && allSessions.isEmpty() -> {
+                uiState.isLoading && uiState.projects.isEmpty() -> {
                     PulsingDotsIndicator(
                         modifier = Modifier.align(Alignment.Center),
                         dotSize = 12.dp,
                         dotSpacing = 8.dp
                     )
                 }
-                uiState.error != null && allSessions.isEmpty() -> {
+                uiState.error != null && uiState.projects.isEmpty() -> {
                     Column(
                         modifier = Modifier
                             .align(Alignment.Center)
@@ -277,7 +305,49 @@ fun SessionListScreen(
                         }
                     }
                 }
-                allSessions.isEmpty() -> {
+                uiState.selectedProjectId == null && uiState.projects.isEmpty() -> {
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .padding(32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Folder,
+                            contentDescription = null,
+                            modifier = Modifier.size(64.dp),
+                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                        )
+                        Text(
+                            text = stringResource(R.string.projects_empty),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
+                        Text(
+                            text = stringResource(R.string.projects_tap_plus),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                        )
+                    }
+                }
+                uiState.selectedProjectId == null -> {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(uiState.projects, key = { projectWithSessions ->
+                            projectWithSessions.project.id.ifBlank { "unknown:${projectWithSessions.project.worktree}" }
+                        }) { projectWithSessions ->
+                            ProjectListRow(
+                                projectWithSessions = projectWithSessions,
+                                onClick = { viewModel.selectProject(projectWithSessions.project.id) }
+                            )
+                        }
+                    }
+                }
+                visibleSessions.isEmpty() -> {
                     Column(
                         modifier = Modifier
                             .align(Alignment.Center)
@@ -292,12 +362,21 @@ fun SessionListScreen(
                             tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
                         )
                         Text(
-                            text = stringResource(R.string.sessions_empty),
-                            style = MaterialTheme.typography.bodyLarge,
+                            text = stringResource(
+                                R.string.sessions_in_project,
+                                selectedProject?.project?.let { project ->
+                                    if (project.id.isBlank()) {
+                                        stringResource(R.string.project_unknown)
+                                    } else {
+                                        project.displayName
+                                    }
+                                }.orEmpty()
+                            ),
+                            style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                         )
                         Text(
-                            text = stringResource(R.string.sessions_tap_plus),
+                            text = stringResource(R.string.sessions_empty_in_project),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
                         )
@@ -309,36 +388,32 @@ fun SessionListScreen(
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        for (group in uiState.sessionGroups) {
-                            items(group.sessions, key = { it.session.id }) { item ->
-                                val untitledLabel = stringResource(R.string.session_untitled)
-                                val dirLabel = group.sessionDirLabels[item.session.id]
-                                    ?: group.directory.ifEmpty { group.projectName }
-                                SessionRow(
-                                    item = item,
-                                    projectName = dirLabel,
-                                    isSelectionMode = uiState.isSelectionMode,
-                                    isSelected = item.session.id in uiState.selectedIds,
-                                    onClick = {
-                                        if (uiState.isSelectionMode) {
-                                            viewModel.toggleSelection(item.session.id)
-                                        } else {
-                                            onNavigateToChat(item.session.id, false)
-                                        }
-                                    },
-                                    onLongClick = { viewModel.toggleSelection(item.session.id) },
-                                    onRename = {
-                                        renameSessionId = item.session.id
-                                        renameText = item.session.title ?: ""
-                                        showRenameDialog = true
-                                    },
-                                    onDelete = {
-                                        deleteSessionId = item.session.id
-                                        deleteSessionTitle = item.session.title ?: untitledLabel
-                                        showDeleteDialog = true
+                        items(visibleSessions, key = { it.session.id }) { item ->
+                            val untitledLabel = stringResource(R.string.session_untitled)
+                            SessionRow(
+                                item = item,
+                                projectName = item.session.directory,
+                                isSelectionMode = uiState.isSelectionMode,
+                                isSelected = item.session.id in uiState.selectedIds,
+                                onClick = {
+                                    if (uiState.isSelectionMode) {
+                                        viewModel.toggleSelection(item.session.id)
+                                    } else {
+                                        onNavigateToChat(item.session.id, false)
                                     }
-                                )
-                            }
+                                },
+                                onLongClick = { viewModel.toggleSelection(item.session.id) },
+                                onRename = {
+                                    renameSessionId = item.session.id
+                                    renameText = item.session.title ?: ""
+                                    showRenameDialog = true
+                                },
+                                onDelete = {
+                                    deleteSessionId = item.session.id
+                                    deleteSessionTitle = item.session.title ?: untitledLabel
+                                    showDeleteDialog = true
+                                }
+                            )
                         }
                     }
                 }
@@ -348,7 +423,7 @@ fun SessionListScreen(
 
     // Quick new session dialog (recent projects)
     if (showQuickNewSession) {
-        val allSessions = uiState.sessionGroups.flatMap { it.sessions }
+        val allSessions = uiState.projects.flatMap { it.sessions }
         NewSessionQuickDialog(
             sessions = allSessions,
             onSelectDirectory = { directory ->
@@ -367,7 +442,7 @@ fun SessionListScreen(
     if (showOpenProject) {
         OpenProjectDialog(
             viewModel = viewModel,
-            projects = uiState.projects,
+            projects = uiState.knownProjects,
             onSelect = { directory ->
                 showOpenProject = false
                 viewModel.createNewSession(directory = directory)
@@ -536,6 +611,80 @@ private fun ProjectHeader(
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
         )
+    }
+}
+
+@Composable
+private fun ProjectListRow(
+    projectWithSessions: ProjectWithSessions,
+    onClick: () -> Unit,
+) {
+    val dateFormat = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
+    val project = projectWithSessions.project
+    val sessions = projectWithSessions.sessions
+    val lastUpdated = sessions.maxOfOrNull { it.session.time.updated }
+    val projectName = if (project.id.isBlank()) {
+        stringResource(R.string.project_unknown)
+    } else {
+        project.displayName
+    }
+    val projectPath = project.worktree.ifBlank { sessions.firstOrNull()?.session?.directory.orEmpty() }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Default.Folder,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = projectName,
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (projectPath.isNotBlank()) {
+                    Text(
+                        text = projectPath,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = stringResource(R.string.project_sessions_count, sessions.size),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (lastUpdated != null) {
+                        Text(
+                            text = dateFormat.format(Date(lastUpdated)),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
