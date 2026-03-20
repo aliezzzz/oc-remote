@@ -201,9 +201,14 @@ data class Project(
     /** Display name: explicit name, or last path segment of worktree, or id */
     val displayName: String
         get() = name?.takeIf { it.isNotEmpty() }
-            ?: worktree.takeIf { it.isNotEmpty() }?.trimEnd('/')?.substringAfterLast('/')?.takeIf { it.isNotEmpty() }
-            ?: path.takeIf { it.isNotEmpty() }?.trimEnd('/')?.substringAfterLast('/')?.takeIf { it.isNotEmpty() }
+            ?: worktree.takeIf { it.isNotEmpty() }?.let { extractFolderName(it) }
+            ?: path.takeIf { it.isNotEmpty() }?.let { extractFolderName(it) }
             ?: id.take(8)
+
+    private fun extractFolderName(path: String): String {
+        val trimmed = path.trimEnd('\\', '/')
+        return trimmed.substringAfterLast('\\').substringAfterLast('/').takeIf { it.isNotEmpty() } ?: trimmed
+    }
 }
 
 
